@@ -42,11 +42,6 @@
 // Additional UI functions
 #include "GfxUi.h"
 
-// Fonts created by http://oleddisplay.squix.ch/
-#include "ArialRoundedMTBold_14.h"
-#include "ArialRoundedMTBold_36.h"
-// Download helper
-#include "WebResource.h"
 
 #include <ESP8266WiFi.h>
 #include <ArduinoOTA.h>
@@ -57,11 +52,10 @@
 // check settings.h for adapting to your needs
 #include "settings.h"
 #include <BlynkSimpleEsp8266.h>
+#include <TimeLib.h>
+#include <WidgetRTC.h>
 // Helps with connecting to internet
 #include <WiFiManager.h>
-#include <JsonListener.h>
-#include <WundergroundClient.h>
-#include "TimeClient.h"
 
 /***********************************************************************************************
  * Blynk                                                                                       *     
@@ -69,7 +63,22 @@
 
 
 BlynkTimer timer;
+WidgetRTC rtc;
 WidgetTerminal terminal(V10);
+
+//BLYNK_CONNECTED() {
+  // Synchronize time on connection
+//  rtc.begin();
+//}
+
+char Date[16];
+char Time[16];
+
+String currentTime = String(hour()) + ":" + minute() + ":" + second();
+String currentDate = String(day()) + " " + month() + " " + year();
+
+//sprintf(Date, "%04d/%02d/%02d", year(), month(), day());
+//sprintf(Time, "%02d:%02d:%02d", hour(), minute(), second());
 
 int cmdCalORP = 0;
 int cmdCalPH7 = 0;
@@ -79,7 +88,6 @@ int cmdCalCORP = 0;
 int cmdCalCPH = 0;
 int cmdTempComp = 0;
 
-//String inputString = "";
 /***********************************************************************************************
  * EZO stuff                                                                                   *     
  ***********************************************************************************************/
@@ -138,30 +146,20 @@ boolean booted = true;
 
 GfxUi ui = GfxUi(&tft);
 
-WebResource webResource;
-TimeClient timeClient(UTC_OFFSET);
-
-// Set to false, if you prefere imperial/inches, Fahrenheit
-WundergroundClient wunderground(IS_METRIC);
-
 /***********************************************************************************************
  * Declaring prototypes                                                                        *     
  ***********************************************************************************************/
 void configModeCallback (WiFiManager *myWiFiManager);
-void downloadCallback(String filename, int16_t bytesDownloaded, int16_t bytesTotal);
-ProgressCallback _downloadCallback = downloadCallback;
-void downloadResources();
-void updateData();
-void drawProgress(uint8_t percentage, String text);
-void drawTime();
-void drawCurrentWeather();
-//void drawForecast();
-//void drawForecastDetail(uint16_t x, uint16_t y, uint8_t dayIndex);
-String getMeteoconIcon(String iconText);
+//void drawProgress(uint8_t percentage, String text);
+//void drawTime();
+
 void drawEZO();
 void requestTemp();
 void drawSeparator(uint16_t y);
-
+void receive_reading();
+void request_reading();
+void do_sensor_readings();
+void do_serial();
 long lastDownloadUpdate = millis();
 long lastTempTime = millis();
 
@@ -202,13 +200,35 @@ void ICACHE_RAM_ATTR osWatch(void) {
     }
 }
 /***********************************************************************************************
+ * Clockdisplay (Blynk RTC test)                                                                *     
+ ***********************************************************************************************/
+
+void requestTime() {
+  Blynk.sendInternal("rtc", "sync");
+  
+  // You can call hour(), minute(), ... at any time
+  // Please see Time library examples for details
+
+  currentTime = String(hour()) + ":" + minute() + ":" + second();
+  currentDate = String(day()) + " " + month() + " " + year();
+  Serial.print("Current time: ");
+  Serial.print(currentTime);
+  Serial.print(" ");
+  Serial.print(currentDate);
+  Serial.println();
+}
+/***********************************************************************************************
  * Setup                                                                                       *     
  ***********************************************************************************************/
 void setup() {
   last_loop = millis();                                                       // watchdog loop count
   tickerOSWatch.attach_ms(((OSWATCH_RESET_TIME / 3) * 1000), osWatch);        // watchdog object
-  //timer.setInterval(100, Sent_serial);
+  //timer.setInterval(100, Sent_serial);                                      // set for debugging, setup serial interupt too.
+  setSyncInterval(10*60); // Sync interval in seconds (10 minutes)
 
+  // Display digital clock every 10 seconds
+  timer.setInterval(10000L, requestTime);
+  
   Serial.begin(baud_host);
   pinMode(13, OUTPUT);                                                        // set the led output pin
 
@@ -220,7 +240,8 @@ void setup() {
   tft.setRotation(2);
   tft.fillScreen(TFT_BLACK);
 
-  tft.setFreeFont(&ArialRoundedMTBold_14);
+  //tft.setFreeFont(&ArialRoundedMTBold_14);
+  tft.setTextFont(4);
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.drawString("Gebouwd door DJS 2017", 120, 240);
@@ -248,6 +269,10 @@ void setup() {
   Blynk.connect();
   //WiFi.printDiag(Serial);
   //Blynk.begin(auth, ssid, pass);
+  
+  while(Blynk.connect() == false);
+  rtc.begin();
+  
   WidgetTerminal terminal(V10);
   Blynk.virtualWrite(V10, "\n\n");
   Blynk.virtualWrite(V10, "    ___  __          __ \n");
@@ -267,25 +292,10 @@ void setup() {
   ArduinoOTA.setHostname((const char *)hostname.c_str());
   ArduinoOTA.begin();
 
-   SPIFFS.begin();
-  if (SPIFFS.exists("/WU.jpg") == true) ui.drawJpeg("/WU.jpg", 0, 10);
-  if (SPIFFS.exists("/Earth.jpg") == true) ui.drawJpeg("/Earth.jpg", 0, 320 - 56); // Image is 56 pixels high
-  delay(1000);
   tft.drawString("Verbinden met WiFi", 120, 200);
   tft.setTextPadding(240);                                                    // Pad next drawString() text to full width to over-write old text
-  // download images from the net. If images already exist don't download
-  tft.drawString("Downloaden naar SPIFFS...", 120, 200);
-  tft.drawString(" ", 120, 240);  // Clear line
-  tft.drawString(" ", 120, 260);  // Clear line
-  downloadResources();
-  //listFiles();
-  tft.drawString(" ", 120, 200);  // Clear line above using set padding width
-  tft.drawString("Ophalen weer data...", 120, 220);
-  //delay(500);
-
-  // load the weather information
-  updateData();
-}
+  
+ }
 
 long lastDrew = 0;
 
@@ -301,17 +311,17 @@ void loop() {
   ArduinoOTA.handle();
 
   // Check if we should update the clock
-  if (millis() - lastDrew > 30000 && wunderground.getSeconds() == "00") {
-    drawTime();
-    lastDrew = millis();
-  }
+  //if (millis() - lastDrew > 30000 && rtc.getSeconds() == "00") {
+  //  drawTime();
+  //  lastDrew = millis();
+  //}
 
 
   // Check if we should update weather information
-  if (millis() - lastDownloadUpdate > 1000 * UPDATE_INTERVAL_SECS) {
-    updateData();
-    lastDownloadUpdate = millis();
-  }
+  //if (millis() - lastDownloadUpdate > 1000 * UPDATE_INTERVAL_SECS) {
+  //  updateData();
+  //  lastDownloadUpdate = millis();
+  //}
 
   // EZO update
   do_sensor_readings();
@@ -330,7 +340,8 @@ void loop() {
 // Called if WiFi has not been configured yet
 void configModeCallback (WiFiManager *myWiFiManager) {
 tft.setTextDatum(BC_DATUM);
-tft.setFreeFont(&ArialRoundedMTBold_14);
+//tft.setFreeFont(&ArialRoundedMTBold_14);
+tft.setTextFont(4);
 tft.setTextColor(TFT_ORANGE);
 tft.drawString("Wifi Manager", 120, 28);
 tft.drawString("Please connect to AP", 120, 42);
@@ -340,97 +351,11 @@ tft.setTextColor(TFT_ORANGE);
 tft.drawString("To setup Wifi Configuration", 120, 70);
 }
 
-// callback called during download of files. Updates progress bar
-void downloadCallback(String filename, int16_t bytesDownloaded, int16_t bytesTotal) {
-  Serial.println(String(bytesDownloaded) + " / " + String(bytesTotal));
-
-  tft.setTextDatum(BC_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(240);
-
-  int percentage = 100 * bytesDownloaded / bytesTotal;
-  if (percentage == 0) {
-    tft.drawString(filename, 120, 220);
-  }
-  if (percentage % 5 == 0) {
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextPadding(tft.textWidth(" 888% "));
-    tft.drawString(String(percentage) + "%", 120, 245);
-    ui.drawProgressBar(10, 225, 240 - 20, 15, percentage, TFT_WHITE, TFT_BLUE);
-  }
-
-}
-
-// Download the bitmaps
-void downloadResources() {
-  // tft.fillScreen(TFT_BLACK);
-  tft.setFreeFont(&ArialRoundedMTBold_14);
-  char id[5];
-
-  // Download WU graphic jpeg first and display it, then the Earth view
-  webResource.downloadFile((String)"http://i.imgur.com/njl1pMj.jpg", (String)"/WU.jpg", _downloadCallback);
-  if (SPIFFS.exists("/WU.jpg") == true) ui.drawJpeg("/WU.jpg", 0, 10);
-
-  webResource.downloadFile((String)"http://i.imgur.com/v4eTLCC.jpg", (String)"/Earth.jpg", _downloadCallback);
-  if (SPIFFS.exists("/Earth.jpg") == true) ui.drawJpeg("/Earth.jpg", 0, 320 - 56);
-
-  //webResource.downloadFile((String)"http://i.imgur.com/IY57GSv.jpg", (String)"/Horizon.jpg", _downloadCallback);
-  //if (SPIFFS.exists("/Horizon.jpg") == true) ui.drawJpeg("/Horizon.jpg", 0, 320-160);
-
-  //webResource.downloadFile((String)"http://i.imgur.com/jZptbtY.jpg", (String)"/Rainbow.jpg", _downloadCallback);
-  //if (SPIFFS.exists("/Rainbow.jpg") == true) ui.drawJpeg("/Rainbow.jpg", 0, 0);
-
-  for (int i = 0; i < 19; i++) {
-    sprintf(id, "%02d", i);
-    webResource.downloadFile("http://www.squix.org/blog/wunderground/" + wundergroundIcons[i] + ".bmp", wundergroundIcons[i] + ".bmp", _downloadCallback);
-  }
-  for (int i = 0; i < 19; i++) {
-    sprintf(id, "%02d", i);
-    webResource.downloadFile("http://www.squix.org/blog/wunderground/mini/" + wundergroundIcons[i] + ".bmp", "/mini/" + wundergroundIcons[i] + ".bmp", _downloadCallback);
-  }
-  for (int i = 0; i < 24; i++) {
-    webResource.downloadFile("http://www.squix.org/blog/moonphase_L" + String(i) + ".bmp", "/moon" + String(i) + ".bmp", _downloadCallback);
-  }
-}
 
 // Update the internet based information and update screen
 void updateData() {
-  // booted = true;  // Test only
-  // booted = false; // Test only
-
-  if (booted) ui.drawJpeg("/WU.jpg", 0, 10); // May have already drawn this but it does not take long
-  else tft.drawCircle(22, 22, 16, TFT_DARKGREY); // Outer ring - optional
-
-  if (booted) drawProgress(20, "Updaten tijd...");
-  else fillSegment(22, 22, 0, (int) (20 * 3.6), 16, TFT_NAVY);
-
-  timeClient.updateTime();
-  if (booted) drawProgress(50, "Updaten omstandigheden...");
-  else fillSegment(22, 22, 0, (int) (50 * 3.6), 16, TFT_NAVY);
-
-  wunderground.updateConditions(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
-  if (booted) drawProgress(70, "Updaten voorspellingen...");
-  else fillSegment(22, 22, 0, (int) (70 * 3.6), 16, TFT_NAVY);
-
-  wunderground.updateForecast(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
-  if (booted) drawProgress(90, "Initialiseren EZO sensoren...");
-  else fillSegment(22, 22, 0, (int) (90 * 3.6), 16, TFT_NAVY);
-
-  wunderground.updateAstronomy(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
-  // lastUpdate = timeClient.getFormattedTime();
-  // readyForWeatherUpdate = false;
-  if (booted) drawProgress(100, "Klaar...");
-  else fillSegment(22, 22, 0, 360, 16, TFT_NAVY);
-
-  if (booted) delay(2000);
-
-  if (booted) tft.fillScreen(TFT_BLACK);
-  else   fillSegment(22, 22, 0, 360, 22, TFT_BLACK);
-
-  //tft.fillScreen(TFT_CYAN); // For text padding and update graphics over-write checking only
+  
   drawTime();
-  drawCurrentWeather();
-  //drawForecast();
   drawEZO();
 
   //if (booted) screenshotToConsole(); // Documentation support only!
@@ -439,8 +364,8 @@ void updateData() {
 
 // Progress bar helper
 void drawProgress(uint8_t percentage, String text) {
-  tft.setFreeFont(&ArialRoundedMTBold_14);
-
+  //tft.setFreeFont(&ArialRoundedMTBold_14);
+  tft.setTextFont(4);
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
   tft.setTextPadding(240);
@@ -453,153 +378,40 @@ void drawProgress(uint8_t percentage, String text) {
 
 // draws the clock
 void drawTime() {
-  tft.setFreeFont(&ArialRoundedMTBold_14);
-
-  String date = wunderground.getDate();
-
+  //tft.setFreeFont(&ArialRoundedMTBold_14);
+  tft.setTextFont(4);
+  
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth(" Ddd, 44 Mmm 4444 "));  // String width + margin
-  tft.drawString(date, 120, 14);
+  tft.drawString(currentDate, 120, 14);
 
-  tft.setFreeFont(&ArialRoundedMTBold_36);
-
-  String timeNow = timeClient.getHours() + ":" + timeClient.getMinutes();
-
+  //tft.setFreeFont(&ArialRoundedMTBold_36);
+  tft.setTextFont(6);
+  
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.setTextPadding(tft.textWidth(" 44:44 "));  // String width + margin
-  tft.drawString(timeNow, 120, 50);
+  tft.drawString(currentTime, 120, 50);
 
   drawSeparator(52);
-
-  tft.setTextPadding(0);
-}
-
-// draws current weather information
-void drawCurrentWeather() {
-  // Weather Icon
-  String weatherIcon = getMeteoconIcon(wunderground.getTodayIcon());
-  //uint32_t dt = millis();
-  ui.drawBmp(weatherIcon + ".bmp", 0, 59);
-  //Serial.print("Icon draw time = "); Serial.println(millis()-dt);
-
-  // Weather Text
-
-  String weatherText = wunderground.getWeatherText();
-  //weatherText = "Heavy Thunderstorms with Small Hail"; // Test line splitting with longest(?) string
-
-  tft.setFreeFont(&ArialRoundedMTBold_14);
-
-  tft.setTextDatum(BR_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-
-  int splitPoint = 0;
-  int xpos = 230;
-  splitPoint =  splitIndex(weatherText);
-  if (splitPoint > 16) xpos = 235;
-
-  tft.setTextPadding(tft.textWidth(" Heavy Thunderstorms"));  // Max anticipated string width + margin
-  if (splitPoint) tft.drawString(weatherText.substring(0, splitPoint), xpos, 72);
-  tft.setTextPadding(tft.textWidth(" with Small Hail"));  // Max anticipated string width + margin
-  tft.drawString(weatherText.substring(splitPoint), xpos, 87);
-
-  tft.setFreeFont(&ArialRoundedMTBold_36);
-
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("-88`"));
-
-  // Font ASCII code 96 (0x60) modified to make "`" a degree symbol
-  weatherText = wunderground.getCurrentTemp();
-  if (weatherText.indexOf(".")) weatherText = weatherText.substring(0, weatherText.indexOf(".")); // Make it integer temperature
-  if (weatherText == "") weatherText = "?";  // Handle null return
-  tft.drawString(weatherText + "`", 221, 100);
-
-  tft.setFreeFont(&ArialRoundedMTBold_14);
-
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextPadding(0);
-  if (IS_METRIC) tft.drawString("C ", 221, 100);
-  else  tft.drawString("F ", 221, 100);
-
-  weatherText = wunderground.getWindDir() + " ";
-  weatherText += String((int)(wunderground.getWindSpeed().toInt() * WIND_SPEED_SCALING)) + WIND_SPEED_UNITS;
-
-  tft.setTextPadding(tft.textWidth("Variable 888 mph ")); // Max string length?
-  tft.drawString(weatherText, 114, 136);
-
-  weatherText = wunderground.getWindDir();
-
-  int windAngle = 0;
-  String compassCardinal = "";
-  switch (weatherText.length()) {
-    case 1:
-      compassCardinal = "N O Z W "; // Not used, see default below
-      windAngle = 90 * compassCardinal.indexOf(weatherText) / 2;
-      break;
-    case 2:
-      compassCardinal = "NO ZO ZW NW";
-      windAngle = 45 + 90 * compassCardinal.indexOf(weatherText) / 3;
-      break;
-    case 3:
-      compassCardinal = "NNO ONO OZO ZZO ZZW WZW WNW NNW";
-      windAngle = 22 + 45 * compassCardinal.indexOf(weatherText) / 4; // Should be 22.5 but accuracy is not needed!
-      break;
-    default:
-      if (weatherText == "Variable") windAngle = -1;
-      else {
-        compassCardinal = "North Oost  Zuid West"; // Possible strings
-        windAngle = 90 * compassCardinal.indexOf(weatherText) / 6;
-      }
-      break;
-  }
-
-  tft.fillCircle(128, 110, 23, TFT_BLACK); // Erase old plot, radius + 1 to delete stray pixels
-  if ( windAngle >= 0 ) fillSegment(128, 110, windAngle - 15, 30, 22, TFT_GREEN); // Might replace this with a bigger rotating arrow
-  tft.drawCircle(128, 110, 6, TFT_RED);
-  tft.drawCircle(128, 110, 22, TFT_DARKGREY);    // Outer ring - optional
-
   drawSeparator(153);
-
-  tft.setTextPadding(0); // Reset padding width to none
+  tft.setTextPadding(0);
 }
 
-// draws the three forecast columns
-/*void drawForecast() {
-  drawForecastDetail(10, 171, 0);
-  drawForecastDetail(95, 171, 2);
-  drawForecastDetail(180, 171, 4);
-  drawSeparator(171 + 69);
-  }
 
-  // helper for the forecast columns
-  void drawForecastDetail(uint16_t x, uint16_t y, uint8_t dayIndex) {
-  tft.setFreeFont(&ArialRoundedMTBold_14);
 
-  String day = wunderground.getForecastTitle(dayIndex).substring(0, 3);
-  day.toUpperCase();
-
-  tft.setTextDatum(BC_DATUM);
-
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("WWW"));
-  tft.drawString(day, x + 25, y);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("-88   -88"));
-  tft.drawString(wunderground.getForecastHighTemp(dayIndex) + "   " + wunderground.getForecastLowTemp(dayIndex), x + 25, y + 14);
-
-  String weatherIcon = getMeteoconIcon(wunderground.getForecastIcon(dayIndex));
-  ui.drawBmp("/mini/" + weatherIcon + ".bmp", x, y + 15);
-
-  tft.setTextPadding(0); // Reset padding width to none
-  }
-*/
-// draw sensordata
+// draw sensordata and time
 void drawEZO() {
+  tft.setTextFont(4);
+  tft.setTextSize(2);           // We are using a size multiplier of 1
+  tft.setCursor(30, 10);    // Set cursor to x = 30, y = 175
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);  // Set text colour to white and background to black
+  tft.println(currentTime);
+  
   //Title
-  tft.setFreeFont(&ArialRoundedMTBold_36);
+  //tft.setFreeFont(&ArialRoundedMTBold_36);
+  tft.setTextFont(4);
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_BLUE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth("Pool Monitor"));
@@ -617,7 +429,8 @@ void drawEZO() {
   tft.drawString(TEMP_val + "`", 221, 240);
   tft.setTextDatum(BL_DATUM);
   tft.setTextPadding(0);
-  tft.setFreeFont(&ArialRoundedMTBold_14);
+  //tft.setFreeFont(&ArialRoundedMTBold_14);
+  tft.setTextFont(4);
   tft.drawString("C ", 221, 220);
   Blynk.virtualWrite (V1, TEMP_val);
   //tft.setTextDatum(MR_DATUM);
@@ -626,7 +439,8 @@ void drawEZO() {
   //tft.drawString("test", 120, 240);
 
   //PH
-  tft.setFreeFont(&ArialRoundedMTBold_36);
+  //tft.setFreeFont(&ArialRoundedMTBold_36);
+  tft.setTextFont(4);
   tft.setTextDatum(BR_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
   tft.setTextPadding(0); // Reset padding width to none
@@ -648,38 +462,15 @@ void drawEZO() {
   tft.drawString(ORP_val, 220, 315);
   tft.setTextDatum(BL_DATUM);
   //tft.setTextPadding(0);
-  tft.setFreeFont(&ArialRoundedMTBold_14);
+  //tft.setFreeFont(&ArialRoundedMTBold_14);
+  tft.setTextFont(4);
   tft.drawString("mV", 221, 310);
   Blynk.virtualWrite (V3, ORP_val);
   //Cleanup for next string
   tft.setTextPadding(0); // Reset padding width to none
 }
 
-// Helper function, should be part of the weather station library and should disappear soon
-String getMeteoconIcon(String iconText) {
-  if (iconText == "F") return "chanceflurries";
-  if (iconText == "Q") return "chancerain";
-  if (iconText == "W") return "chancesleet";
-  if (iconText == "V") return "chancesnow";
-  if (iconText == "S") return "chancetstorms";
-  if (iconText == "B") return "clear";
-  if (iconText == "Y") return "cloudy";
-  if (iconText == "F") return "flurries";
-  if (iconText == "M") return "fog";
-  if (iconText == "E") return "hazy";
-  if (iconText == "Y") return "mostlycloudy";
-  if (iconText == "H") return "mostlysunny";
-  if (iconText == "H") return "partlycloudy";
-  if (iconText == "J") return "partlysunny";
-  if (iconText == "W") return "sleet";
-  if (iconText == "R") return "rain";
-  if (iconText == "W") return "snow";
-  if (iconText == "B") return "sunny";
-  if (iconText == "0") return "tstorms";
 
-
-  return "unknown";
-}
 
 // if you want separators, uncomment the tft-line
 void drawSeparator(uint16_t y) {
@@ -717,34 +508,7 @@ int leftOffset(String text, String sub)
   return tft.textWidth(text.substring(0, index));
 }
 
-// Draw a segment of a circle, centred on x,y with defined start_angle and subtended sub_angle
-// Angles are defined in a clockwise direction with 0 at top
-// Segment has radius r and it is plotted in defined colour
-// Can be used for pie charts etc, in this sketch it is used for wind direction
-#define DEG2RAD 0.0174532925 // Degrees to Radians conversion factor
-#define INC 2 // Minimum segment subtended angle and plotting angle increment (in degrees)
-void fillSegment(int x, int y, int start_angle, int sub_angle, int r, unsigned int colour)
-{
-  // Calculate first pair of coordinates for segment start
-  float sx = cos((start_angle - 90) * DEG2RAD);
-  float sy = sin((start_angle - 90) * DEG2RAD);
-  uint16_t x1 = sx * r + x;
-  uint16_t y1 = sy * r + y;
 
-  // Draw colour blocks every INC degrees
-  for (int i = start_angle; i < start_angle + sub_angle; i += INC) {
-
-    // Calculate pair of coordinates for segment end
-    int x2 = cos((i + 1 - 90) * DEG2RAD) * r + x;
-    int y2 = sin((i + 1 - 90) * DEG2RAD) * r + y;
-
-    tft.fillTriangle(x1, y1, x2, y2, x, y, colour);
-
-    // Copy segment end to sgement start for next segment
-    x1 = x2;
-    y1 = y2;
-  }
-}
 // blinks a led on pin 13 asynchronously
 void blink_led() {
   if (millis() >= next_blink_time) {                  // is it time for the blink already?
@@ -927,6 +691,8 @@ void requestTemp()  {
 /***********************************************************************************************
  * Blynk                                                                                       *     
  ***********************************************************************************************/
+
+ 
 BLYNK_WRITE(V11){
    cmdCalORP = param.asInt(); // Get the state of the VButton
    if (cmdCalORP == 1) {
@@ -980,4 +746,9 @@ BLYNK_WRITE(V17){
     send_command();  
       }
 } 
-
+BLYNK_WRITE(InternalPinRTC) {
+  long t = param.asLong();
+  Serial.print("Unix time: ");
+  Serial.print(t);
+  Serial.println();
+}

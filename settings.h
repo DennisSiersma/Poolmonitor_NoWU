@@ -45,35 +45,11 @@ char pass[] = "Dustin01!";
 //Blynk Auth token
 char auth[] = "0a3b9f9e4c3446508446b726ffb6a66f";
 
-// TimeClient settings
-const float UTC_OFFSET = 2;
 
 //Ticker Watchdog
 
 
-// Wunderground Settings, EDIT TO SUIT YOUR LOCATION
-const boolean IS_METRIC = true; // Temperature only? Wind speed units appear to stay in mph. To do: investigate <<<<<<<<<<<<<<<<<<<<<<<<<
-const String WUNDERGRROUND_API_KEY = "6b62192162a18dc1";
-const String WUNDERGRROUND_LANGUAGE = "NL";
-const String WUNDERGROUND_COUNTRY = "NL";
-const String WUNDERGROUND_CITY = "Dinther";
 
-// Windspeed conversion, use 1 pair of #defines. To do: investigate a more convenient method <<<<<<<<<<<<<<<<<<<<<
-//#define WIND_SPEED_SCALING 1.0      // mph
-//#define WIND_SPEED_UNITS " mph"
-
-//#define WIND_SPEED_SCALING 0.868976 // mph to knots
-//#define WIND_SPEED_UNITS " kn"
-
-#define WIND_SPEED_SCALING 1.60934  // mph to kph
-#define WIND_SPEED_UNITS " kph"
-
-//Thingspeak Settings - not used, no need to populate this at the moment
-const String THINGSPEAK_CHANNEL_ID = "<CHANNEL_ID_HERE>";
-const String THINGSPEAK_API_READ_KEY = "<API_READ_KEY_HERE>";
-
-// List, so that the downloader knows what to fetch
-String wundergroundIcons [] = {"chanceflurries","chancerain","chancesleet","chancesnow","clear","cloudy","flurries","fog","hazy","mostlycloudy","mostlysunny","partlycloudy","partlysunny","rain","sleet","snow","sunny","tstorms","unknown"};
 
 /***************************
  * End Settings
